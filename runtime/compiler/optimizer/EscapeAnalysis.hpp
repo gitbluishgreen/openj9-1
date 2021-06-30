@@ -38,6 +38,9 @@
 #include "optimizer/Optimization_inlines.hpp"
 #include "optimizer/OptimizationManager.hpp"
 
+#include <fstream>
+#include <sys/stat.h>
+
 class TR_EscapeAnalysis;
 class TR_FlowSensitiveEscapeAnalysis;
 class TR_LocalFlushElimination;
@@ -459,6 +462,39 @@ class TR_EscapeAnalysis : public TR::Optimization
 
    protected:
 
+   void traverse_graph(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* t,std::vector<TR::TreeTop*> curr_path,std::map<int,int> accessed_fields,std::set<int> inserted_fields,std::set<TR::Node*> nodes_to_replace,std::map<TR::Block*,int> visit_count,std::list<TR::TreeTop*>& end_points);
+   void scalarize(int candidate_bci, TR::TreeTop* receiving_object,std::vector<TR::TreeTop*>& path,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace);
+   void recursively_replace(TR::Node* n, TR::Node* parent,int child_number,TR::TreeTop* t,std::map<int,int>& accessed_fields,std::set<TR::Node*>& dead_loads_stores,int candidate_bci);
+   void recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace);
+   void place_loads_on_entry(int candidate_bci,TR::TreeTop* receivng_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
+   void place_stores_on_exit(int candidate_bci,TR::TreeTop* receivng_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
+   void insert_missing_stores(int candidate_bci,TR::TreeTop* first_treetop,TR::TreeTop* last_treetop,TR::TreeTop* receiving_object);
+   bool is_reachable(int candidate_bci, TR::Node* curr_node);
+   bool is_thread_local(int candidate_bci);
+   bool is_reachable_in_ptg(int candidate_bci);
+   bool is_not_aliased(int candidate_bci);
+   bool process_escape_information();
+   void update_points_to_info();
+   void clean_treetops();
+   std::map<std::string,std::set<int>> nonescaping_candidates;//candidates that can be considered for scalarization.
+   std::map<std::string,std::map<int,std::set<int>>> dereferenced_fields;//Describes what candidates are accessed under which field reference.
+   std::map<std::string,std::map<int,std::set<int>>> function_calls;//Describes reachable candidates at a function call site.
+   std::map<std::string,std::map<std::string,std::set<int>>> variables;//Variable edges in the PTG
+   std::map<std::string,std::map<int,std::map<std::string,std::set<int>>>> fields;//field edges in the PTG. 
+   std::map<std::string,std::set<TR::TreeTop*>> inserted_treetops;//treetops that have been added in this pass.
+   std::set<TR::TreeTop*> removed_treetops;//treetops that have been deleted in this pass.
+   std::map<int,std::map<int,TR::SymbolReference*>> symref_map;//Maps every symref to a temporary.
+   std::map<int,std::map<TR::TreeTop*,std::set<int>>> load_added_on_field;//Describes if the current candidate has had its field loaded on entry.
+   std::map<int,std::map<TR::TreeTop*,std::set<int>>> store_added_on_field;//Describes if the current candidate has had its field stored on exit.
+   std::map<int,std::set<int>> null_checked_fields;//Describes if a particular field under a particular candidate is being null checked. 
+   std::map<int,TR::SymbolReference*> parameter_map;//for every param, store the symref of the receiver.
+   std::set<std::pair<TR::TreeTop*,TR::TreeTop*>> endpoint_pairs;
+   std::set<TR::TreeTop*> treetops_to_inspect;
+   std::set<TR::Node*> scalarize_count;
+   std::set<TR::Node*> field_access_count;//count across all candidates
+   int max_path;
+
+   
    enum restrictionType { MakeNonLocal, MakeContiguous, MakeObjectReferenced };
 
    int32_t  performAnalysisOnce();
