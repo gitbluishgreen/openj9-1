@@ -1430,8 +1430,10 @@ void TR_EscapeAnalysis::scalarize(int candidate_bci, TR::TreeTop* receiving_obje
 
 int32_t TR_EscapeAnalysis::perform()
    {
-   if(feGetEnv("SPLIT_SCALARIZATION") == NULL)
-      return 0;//prevents a bootstrap error.  
+   do
+      { 
+      if(feGetEnv("SPLIT_SCALARIZATION") == NULL)
+         break;//prevents a bootstrap error. 
    traceMsg(comp(),"Starting Scalarization pass %d!\n",manager()->numPassesCompleted());
    treetops_to_inspect.clear();
    scalarize_count.clear();
@@ -1690,6 +1692,8 @@ int32_t TR_EscapeAnalysis::perform()
    traceMsg(comp(),"Scalarized fields: %d\nAccessed fields:%d\nMaximum path size:%d\n",scalarize_count.size(),field_access_count.size(),max_path);
    //manager()->incNumPassesCompleted();//pass of EA over!
    return 0;
+}
+while(false);
    if (comp()->isOptServer() && (comp()->getMethodHotness() <= warm))
       return 0;
 
