@@ -213,103 +213,128 @@ bool TR_EscapeAnalysis::isImmutableObject(Candidate *candidate)
    candidate->_isImmutable = b;
    return b;
    }
-void TR_EscapeAnalysis::traverse_graph(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* t,std::vector<TR::TreeTop*> curr_path,std::map<int,int> accessed_fields,std::set<int> inserted_fields,std::set<TR::Node*> nodes_to_replace,std::map<TR::Block*,int> visit_count,std::list<TR::TreeTop*>& end_points)
+void TR_EscapeAnalysis::traverse_between_endpoints(int candidate_bci,TR::TreeTop* current_tt,TR::TreeTop* source, TR::TreeTop* destination,std::map<TR::Block*,TR::Block*>& parent,std::set<TR::Block*>& visited,std::set<TR::Block*>& reaches_endpoint,std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points)
 {
-   if(t == NULL)
-      return;//may happen if we reach the block with the recompilation counter!
-   curr_path.push_back(t);
-   // traceMsg(comp(),"The current path is:\n");
-   // for(TR::TreeTop* t1 : curr_path)
-   // {
-   //    getDebug()->print(comp()->getOutFile(),t1);
-   // }
-   TR::Block* bl = t->getEnclosingBlock();
-   int allowed_visit_count = (visit_count[bl]==2)?0:1;
-   //traceMsg(comp(),"In basic block %d now!\n",bl->getNumber());
-   TR::Node* n = t->getNode();
-   t = t->getPrevTreeTop();
-   while(true)
+   TR::Block* bl = current_tt->getEnclosingBlock();
+   visited.insert(bl);
+   TR::TreeTop* tt = current_tt;
+   while(tt->getNode()->getOpCodeValue() != TR::BBStart && tt != destination)
+        tt = tt->getPrevTreeTop();
+   if(tt == destination)
    {
-      if(t == NULL)
+      traceMsg(comp(),"Marking block as reachable!\n");
+      reaches_endpoint.insert(bl);
+      TR::TreeTop* curr = current_tt;//where we started from.
+      std::map<int,int> accessed_fields;
+      std::set<TR::Node*> nodes_to_replace;
+      std::set<TR::TreeTop*> treetops_to_inspect;
+      bool processed = false;
+      while(true)
       {
-         for(TR::CFGEdge* edge: bl->getPredecessors())
+         while(curr->getNode()->getOpCodeValue() != TR::BBStart && curr != destination)
          {
-            TR::Block* bl1 = edge->getFrom()->asBlock();
-            if(visit_count[bl1] <= allowed_visit_count)
+            if(processed_treetops.find(curr) != processed_treetops.end())
             {
-               visit_count[bl1]++;
-               traverse_graph(candidate_bci,receiving_object,bl1->getExit(),curr_path,accessed_fields,inserted_fields,nodes_to_replace,visit_count,end_points);
-               visit_count[bl1]--;
+               processed = true;
+               break;
+            }
+            processed_treetops.insert(curr);
+            bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr) != inserted_treetops[comp()->signature()].end());
+            comp()->getDebug()->print(comp()->getOutFile(),curr);
+            recursively_detect(candidate_bci,curr->getNode(),curr,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
+            if(curr == destination)
+            {
+               processed = true;
+               break;
+            }
+            curr = curr->getPrevTreeTop();
+         }
+         if(processed)
+            break;
+         if(parent.find(bl) == parent.end())
+            break;
+         curr = parent[bl]->getExit();
+         if(curr == NULL)
+            break;
+      }
+      std::pair<TR::TreeTop*,TR::TreeTop*> endpoint_pair = std::make_pair(source,destination);
+      for(std::pair<int,int> p: accessed_fields)
+         accessed_fields_between_endpoints[endpoint_pair][p.first] += p.second;
+      for(TR::Node* n: nodes_to_replace)
+         nodes_to_replace_between_endpoints[endpoint_pair].insert(n);
+      for(TR::TreeTop* t: treetops_to_inspect)
+         treetops_to_inspect_between_endpoints[endpoint_pair].insert(t);
+      return;
+   }
+   else if(end_points.find(tt) != end_points.end())
+      return;//cannot traverse backwards anymore. 
+   else
+   {
+      for(TR::CFGEdge* e: bl->getPredecessors())
+      {
+         TR::Block* bl1 = e->getFrom()->asBlock();
+         if(visited.find(bl1) != visited.end())
+         {
+            if(reaches_endpoint.find(bl1) != reaches_endpoint.end())
+            {
+               //traverse until complete.
+               traceMsg(comp(),"Can reach endpoint via a visited member at %d!\n",bl1->getNumber());
+               reaches_endpoint.insert(bl);
+               TR::Block* current_block = bl;
+               TR::TreeTop* curr = bl->getExit();//where we started from.
+               std::map<int,int> accessed_fields;
+               std::set<TR::Node*> nodes_to_replace;
+               std::set<TR::TreeTop*> treetops_to_inspect;
+               bool processed = false;
+               while(true)
+               {
+                  while(curr->getNode()->getOpCodeValue() != TR::BBStart && curr != destination)
+                  {
+                     if(processed_treetops.find(curr) != processed_treetops.end())
+                     {
+                        processed = true;
+                        break;
+                     }
+                     processed_treetops.insert(curr);
+                     bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr) != inserted_treetops[comp()->signature()].end());
+                     recursively_detect(candidate_bci,curr->getNode(),curr,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
+                     if(curr == destination)
+                     {
+                        processed = true;
+                        break;
+                     }
+                     curr = curr->getPrevTreeTop();
+                  }
+                  if(processed)
+                     break;
+                  if(parent.find(bl) == parent.end())
+                     break;
+                  curr = parent[bl]->getExit();
+                  if(curr == NULL)
+                     break;
+               }
+               std::pair<TR::TreeTop*,TR::TreeTop*> endpoint_pair = std::make_pair(source,destination);
+               for(std::pair<int,int> p: accessed_fields)
+                  accessed_fields_between_endpoints[endpoint_pair][p.first] += p.second;
+               for(TR::Node* n: nodes_to_replace)
+                  nodes_to_replace_between_endpoints[endpoint_pair].insert(n);
+               for(TR::TreeTop* t: treetops_to_inspect)
+                  treetops_to_inspect_between_endpoints[endpoint_pair].insert(t);
+               continue;
             }
          }
-         for(TR::CFGEdge* edge: bl->getExceptionPredecessors())
+         else if(bl1->getExit() != NULL)
          {
-            TR::Block* bl1 = edge->getFrom()->asBlock();
-            if(visit_count[bl1] <= allowed_visit_count)
-            {
-               visit_count[bl1]++;
-               traverse_graph(candidate_bci,receiving_object,bl1->getExit(),curr_path,accessed_fields,inserted_fields,nodes_to_replace,visit_count,end_points);
-               visit_count[bl1]--;
-            }
+            parent[bl1] = bl;
+            traceMsg(comp(),"Block %d is being added!\n",bl1->getNumber());
+            traverse_between_endpoints(candidate_bci,bl1->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
          }
-         return;
-      }
-      //comp()->getDebug()->print(comp()->getOutFile(),t);
-      n = t->getNode();
-      if(n->getOpCodeValue() == TR::BBStart)
-      {
-         curr_path.push_back(t);
-         if(std::find(end_points.begin(),end_points.end(),t) != end_points.end())
-         {
-            //traceMsg(comp(),"Scalarizing path for %d!\n",candidate_bci);
-            scalarize(candidate_bci,receiving_object,curr_path,accessed_fields,inserted_fields,nodes_to_replace);
-            return;//starting BB for params. 
-         }
-         break;
-      }
-      if((n->getOpCodeValue() == TR::treetop) || n->getOpCode().isResolveCheck() || n->getOpCode().isNullCheck())
-         n = n->getFirstChild();
-      if((std::find(end_points.begin(),end_points.end(),t) != end_points.end()) || (receiving_object == t))
-      {
-         //treetop is an endpoint. Stop here and scalarize.
-         curr_path.push_back(t);
-         std::string sig(comp()->signature());
-         bool is_inserted_treetop = (inserted_treetops[sig].find(t) != inserted_treetops[sig].end());
-         recursively_detect(candidate_bci,t->getNode(),t,is_inserted_treetop,accessed_fields,inserted_fields,nodes_to_replace);
-         //traceMsg(comp(),"Scalarizing path for %d!\n",candidate_bci);
-         scalarize(candidate_bci,receiving_object,curr_path,accessed_fields,inserted_fields,nodes_to_replace);
-         return;
-      }
-      else
-      { 
-         std::string sig(comp()->signature());
-         bool is_inserted_treetop = (inserted_treetops[sig].find(t) != inserted_treetops[sig].end());
-         recursively_detect(candidate_bci,t->getNode(),t,is_inserted_treetop,accessed_fields,inserted_fields,nodes_to_replace);//check accessed fields.
-      }
-      curr_path.push_back(t);//add it.
-      t = t->getPrevTreeTop();
-   }
-   for(TR::CFGEdge* edge: bl->getPredecessors())
-   {
-      TR::Block* bl1 = edge->getFrom()->asBlock();
-      if(visit_count[bl1] <= allowed_visit_count)
-      {
-         visit_count[bl1]++;
-         traverse_graph(candidate_bci,receiving_object,bl1->getExit(),curr_path,accessed_fields,inserted_fields,nodes_to_replace,visit_count,end_points);
-         visit_count[bl1]--;//reset the map!
       }
    }
-   for(TR::CFGEdge* edge: bl->getExceptionPredecessors())
-   {
-      TR::Block* bl1 = edge->getFrom()->asBlock();
-      if(visit_count[bl1] <= allowed_visit_count)
-      {
-         visit_count[bl1]++;
-         traverse_graph(candidate_bci,receiving_object,bl1->getExit(),curr_path,accessed_fields,inserted_fields,nodes_to_replace,visit_count,end_points);
-         visit_count[bl1]--;
-      }
-   }
+   
 }
+
+
 bool TR_EscapeAnalysis::is_reachable(int candidate_bci,TR::Node* curr_node)
 {
    std::string signature(comp()->signature());
@@ -590,26 +615,17 @@ void TR_EscapeAnalysis::update_points_to_info()
    //traceMsg(comp(),"Successfully updated the PTG\n");
 }
 
-void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace)
+void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace,std::set<TR::TreeTop*>& treetops_to_inspect)
 {
    if(n->getOpCode().isLoadIndirect())
    {
-      if(is_inserted_treetop)
-      {
-         //inspect the opcode received therein.
-         inserted_fields.insert(n->getSymbolReference()->getReferenceNumber());
-         return;
-      }
       if(t->getNode()->getOpCode().isNullCheck())
       {
-         if(n->getFirstChild() == t->getNode()->getNullCheckReference())
+         if(n->getFirstChild() == t->getNode()->getNullCheckReference() && !is_inserted_treetop)
          {
             //this field has a pending null check. Hence, we may not scalarize this field. 
             null_checked_fields[candidate_bci].insert(n->getSymbolReference()->getReferenceNumber());
             field_access_count.insert(n);
-            //traceMsg(comp(),"Detected a Null check reference on symref %d\n",n->getSymbolReference()->getReferenceNumber());
-            // for(int i = 0;i < n->getNumChildren();i++)
-            //    recursively_detect(candidate_bci,n->getChild(i),t,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
             return;
          }
       } 
@@ -624,10 +640,10 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
       std::string field_name(sym_ref->getName(comp()->getDebug()));//check if the name has ".this$" in it. Hidden fields cannot 
       //be written to and hence cannot be scalarized.
       bool is_internal_field = field_name.find(".this$") != std::string::npos;
-      bool is_int_shadow = (sym_ref->getSymbol() == comp()->getSymRefTab()->findGenericIntShadowSymbol()) || (sym_ref == comp()->getSymRefTab()->findDLTBlockSymbolRef());
+      bool is_int_shadow = (sym_ref->getSymbol() == comp()->getSymRefTab()->findGenericIntShadowSymbol()) || (sym_ref == comp()->getSymRefTab()->findDLTBlockSymbolRef()) || (sym_ref->getSymbol()->isUnsafeShadowSymbol());
       bool can_be_scalarized = (!sym_ref->isUnresolved()) && is_reachable(candidate_bci,n) && should_be_compressed && !(is_final_field) && (null_checked_fields[candidate_bci].find(f_num) == null_checked_fields[candidate_bci].end()) && !is_internal_field && !is_int_shadow;
       //Some other optimization creates these. I do not know why.
-      if(should_be_compressed)
+      if(should_be_compressed && !is_int_shadow)
       {
          field_access_count.insert(n);
       }
@@ -659,10 +675,7 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
    else if(n->getOpCode().isStoreIndirect() || (n->getOpCode().isIndirect() && n->getOpCode().isWrtBar()))
    {
       if(is_inserted_treetop)
-      {
-         inserted_fields.insert(n->getSymbolReference()->getReferenceNumber());
          return;
-      }
       if(t->getNode()->getOpCode().isNullCheck())
       {
          TR::Node* load_node = t->getNode()->getFirstChild()->getFirstChild();
@@ -672,7 +685,7 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
             field_access_count.insert(n);
             for(int i = 0;i < n->getNumChildren();i++)
             {
-               recursively_detect(candidate_bci,n->getChild(i),t,is_inserted_treetop,accessed_fields,inserted_fields,nodes_to_replace);
+               recursively_detect(candidate_bci,n->getChild(i),t,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
             }
             return;
          }
@@ -685,10 +698,10 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
       std::string field_name(sym_ref->getName(comp()->getDebug()));//check if the name has ".this$" in it. Hidden fields cannot 
       //be written to and hence cannot be scalarized.
       bool is_internal_field = field_name.find(".this$") != std::string::npos;
-      bool is_int_shadow = (sym_ref->getSymbol() == comp()->getSymRefTab()->findGenericIntShadowSymbol()) || (sym_ref == comp()->getSymRefTab()->findDLTBlockSymbolRef());
+      bool is_int_shadow = (sym_ref->getSymbol() == comp()->getSymRefTab()->findGenericIntShadowSymbol()) || (sym_ref == comp()->getSymRefTab()->findDLTBlockSymbolRef()) || !(sym_ref->getSymbol()->isUnsafeShadowSymbol());
       bool can_be_scalarized = (!sym_ref->isUnresolved()) && is_reachable(candidate_bci,n) && should_be_compressed && (null_checked_fields[candidate_bci].find(f_num) == null_checked_fields[candidate_bci].end()) && !is_internal_field && !is_int_shadow;
       //traceMsg(comp(),"For load on %d under %d: Can_be_scalarized:%d,reachable:%d\n",sym_ref->getReferenceNumber(),candidate_bci,can_be_scalarized,is_reachable(candidate_bci,n));
-      if(should_be_compressed)
+      if(should_be_compressed && !is_int_shadow)
       {
          field_access_count.insert(n);
       }
@@ -718,7 +731,7 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
    }
    //regardless of what the node type is, the children have to be processed to detect loads down the hierarchy. 
    for(int i = 0;i < n->getNumChildren();i++)
-      recursively_detect(candidate_bci,n->getChild(i),t,is_inserted_treetop,accessed_fields,inserted_fields,nodes_to_replace);
+      recursively_detect(candidate_bci,n->getChild(i),t,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
 }
 
 void TR_EscapeAnalysis::recursively_replace(TR::Node* n,TR::Node* parent,int child_number,TR::TreeTop* t,std::map<int,int>& accessed_fields,std::set<TR::Node*>& dead_loads_stores,int candidate_bci)
@@ -1066,14 +1079,6 @@ void TR_EscapeAnalysis::place_stores_on_exit(int candidate_bci,TR::TreeTop* rece
 }
 void TR_EscapeAnalysis::insert_missing_stores(int candidate_bci,TR::TreeTop* first_treetop,TR::TreeTop* last_treetop,TR::TreeTop* receiving_object)
 {
-   if(receiving_object == NULL)
-   {
-      receiving_object = TR::TreeTop::create(comp());
-      TR::Node* ghost_node = TR::Node::create(TR::astore,1);
-      ghost_node->setSymbolReference(parameter_map[candidate_bci]);
-      receiving_object->setNode(ghost_node);
-   }//for params.
-
    for(int field: load_added_on_field[candidate_bci][first_treetop])
    {
       if(store_added_on_field[candidate_bci][last_treetop].find(field) != store_added_on_field[candidate_bci][last_treetop].end())
@@ -1129,9 +1134,9 @@ void TR_EscapeAnalysis::insert_missing_stores(int candidate_bci,TR::TreeTop* fir
    }
 }
 
-void TR_EscapeAnalysis::clean_treetops()
+void TR_EscapeAnalysis::clean_treetops(TR::TreeTop* source,TR::TreeTop* destination)
 {
-   for(TR::TreeTop* t: treetops_to_inspect)
+   for(TR::TreeTop* t: treetops_to_inspect_between_endpoints[std::make_pair(source,destination)])
    {
       //If this treetop houses an awrtbari, then move the same up by one, and decrement reference count.
       if(removed_treetops.find(t) != removed_treetops.end())
@@ -1181,45 +1186,27 @@ void TR_EscapeAnalysis::clean_treetops()
       }
    }
 }
-void TR_EscapeAnalysis::scalarize(int candidate_bci, TR::TreeTop* receiving_object,std::vector<TR::TreeTop*>& path,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace)
+void TR_EscapeAnalysis::scalarize(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* start_point,TR::TreeTop* end_point,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace)
 {
    //run through the current path, and create symbol references for each of these accessed nodes first. Then go about replacing nodes in the tree.
-   std::reverse(path.begin(),path.end());//from starting point to ending point. 
-   int cnt = 0;
-   int size_of_path = path.size();
-   // traceMsg(comp(),"My path has size %d, and is:\n",path.size());
-   // for(TR::TreeTop* t1: path)
-   // {
-   //    getDebug()->print(comp()->getOutFile(), t1);
-   // }
-   if(receiving_object == NULL)
-   {
-      receiving_object = TR::TreeTop::create(comp());
-      TR::Node* ghost_node = TR::Node::create(TR::astore,1);
-      ghost_node->setSymbolReference(parameter_map[candidate_bci]);
-      receiving_object->setNode(ghost_node);
-   }
-   
-   TR::TreeTop* first_tt = path[0];
-   if((first_tt->getNode()->getNumChildren() > 0) && (first_tt->getNode()->getFirstChild()->getOpCodeValue() == TR::athrow))
+   traceMsg(comp(),"Sizes are %d and %d!\n",accessed_fields.size(),nodes_to_replace.size());
+   if((start_point->getNode()->getNumChildren() > 0) && (start_point->getNode()->getFirstChild()->getOpCodeValue() == TR::athrow))
    {
       //invalid path. Cannot scalarize along this path as a throw statement is not reachable!
       return;
    }
-   if(first_tt->getNode()->getOpCode().isReturn())
+   if(start_point->getNode()->getOpCode().isReturn())
       return;//impossible path. 
-   endpoint_pairs.insert(std::make_pair(first_tt,path[path.size()-1]));
-   if(size_of_path <= 2 || accessed_fields.size() == 0)
+   
+   if(accessed_fields.size() == 0)
    {
       //traceMsg(comp(),"Avoiding scalarization along this path because path_size = %d,field_size = %d\n",size_of_path,(int)accessed_fields.size());
       return;
    }
    for(int null_checked_field: null_checked_fields[candidate_bci])
       accessed_fields.erase(null_checked_field);//cannot be scalarized.
-   place_loads_on_entry(candidate_bci,receiving_object,first_tt,accessed_fields);
-   TR::TreeTop* last_tt = path[path.size()-1];
-   place_stores_on_exit(candidate_bci,receiving_object,last_tt,accessed_fields);   
-   max_path = std::max(max_path,(int)path.size());
+   place_loads_on_entry(candidate_bci,receiving_object,start_point,accessed_fields);
+   place_stores_on_exit(candidate_bci,receiving_object,end_point,accessed_fields);   
    for(TR::Node* replace_node: nodes_to_replace)
    {
       int symref_of_field = replace_node->getSymbolReference()->getReferenceNumber();
@@ -1258,315 +1245,204 @@ void TR_EscapeAnalysis::scalarize(int candidate_bci, TR::TreeTop* receiving_obje
          replace_node->setNumChildren(0);
       }
    }
-   /*for(TR::TreeTop* t: path)
-   {
-      cnt++;
-      //for ever treetop t, check opcode, and do this. 
-      //astorei === awrtbari, aload == areadbarrier
-      //take the treetop t of escape point. Before it, insert a treetop for allocation, and treetops for field stores. 
-      //a = new B()
-      //astore
-      //====> new Object()
-      //=======>loadaddr
-      TR::Node* n = t->getNode();
-      if(cnt == 1)
-      {
-         //int candidate_bci = candidate->getByteCodeIndex();
-         //first node in the path. Simply create my temporaries here. 
-         //for now ignoring stack allocation related concerns. 
-         for(std::pair<int,TR::DataType> x: accessed_fields)
-         {
-            //a.f = b; -> a_f = b;  store (a_f) -> (b) 
-            //A a = new A(); =====> (a.f ==> a_f, a.f1 ==> a_f1)
-            //a.f = b ============> astore (a_f symref)
-            //                         ====> indirectload for a.f (symref of field)
-            //                                 ====> aload a
-            //traceMsg(comp(),"Adding loads for restoring.\n");
-            int field = x.first;
-            if(store_added_on_field[candidate_bci][t].find(field) != store_added_on_field[candidate_bci][t].end())
-               continue;//already added a treetop for this
-            store_added_on_field[candidate_bci][t].insert(field);   
-            TR::SymbolReference* sym_ref = comp()->getSymRefTab()->getSymRef(field);//field load symbol reference
-            TR::DataType d = x.second;
-            TR::Node* store_node = TR::Node::create(comp()->il.opCodeForDirectStore(d),1);
-            store_node->setDataType(TR::NoType);
-            TR::Node* indirect_load_node = TR::Node::create(comp()->il.opCodeForIndirectLoad(d),1);
-            indirect_load_node->setDataType(d);
-            indirect_load_node->setSymbolReference(sym_ref);
-            //Optional: Do we need to check the type of the node and accordingly make it a write barrier?
-            //check if it was a write barrier or an ordinary receiver. 
-            TR::Node* restoring_node = receiving_object->getNode();
-            if(restoring_node->getOpCode().isResolveCheck() || restoring_node->getOpCode().isNullCheck() || restoring_node->getOpCodeValue() == TR::treetop)
-               restoring_node = restoring_node->getFirstChild();
-            if(restoring_node->getOpCode().isIndirect() && (restoring_node->getOpCode().isWrtBar() || restoring_node->getOpCode().isStore()))
-               restoring_node = restoring_node->getFirstChild();//3 children, 1st and 3rd are the same. 
-            if(symref_map[candidate_bci].find(field) == symref_map[candidate_bci].end())
-            {
-               //we need to create a new temporary for this field on the stack. 
-               size_t size_of_node = sym_ref->getSize();
-               TR::SymbolReference* new_symref = comp()->getSymRefTab()->createTemporary(comp()->getMethodSymbol(),d,false,size_of_node);
-               traceMsg(comp(),"Creating a new symref for %d with num %d\n!",field,new_symref->getReferenceNumber());
-               symref_map[candidate_bci][field] = new_symref; 
-            }
-            TR::Node* load_child = TR::Node::create(comp()->il.opCodeForDirectLoad(restoring_node->getDataType()),0);
-            load_child->setSymbolReference(restoring_node->getSymbolReference());  
-            indirect_load_node->setAndIncChild(0,load_child);
-            store_node->setAndIncChild(0,indirect_load_node);
-            store_node->setSymbolReference(symref_map[candidate_bci].find(field)->second);
-            TR::TreeTop* to_insert = TR::TreeTop::create(comp());
-            inserted_treetops.insert(to_insert);
-            to_insert->setNode(store_node);
-            if(d.isAddress())
-            {
-               //generate a compressed refs node for the field load.
-               TR::Node* cref_node = TR::Node::create(TR::compressedRefs,2);
-               TR::Node* lconst_node = TR::Node::create(TR::lconst,0);
-               lconst_node->setConstValue(0);
-               //lconst_node->setDataType(TR::long);
-               cref_node->setAndIncChild(0,indirect_load_node);
-               cref_node->setAndIncChild(1,lconst_node);
-               TR::TreeTop* cref_tt = TR::TreeTop::create(comp());
-               inserted_treetops.insert(cref_tt);
-               cref_tt->setNode(cref_node);
-               t->insertAfter(to_insert);//insert the store after generating a wrtbar to load from stack.
-               t->insertAfter(cref_tt);
-            }
-            else
-               t->insertAfter(to_insert);//restoration is complete. 
-            //traceMsg(comp(),"Restored field %d after init call\n",field);
-         }
-      }
-      else if(cnt < size_of_path)
-      {
-         //replace fields if necessary.
-         bool do_not_process = (removed_treetops.find(t) != removed_treetops.end()) || (inserted_treetops.find(t) != inserted_treetops.end()); 
-         if(do_not_process)
-            continue;//do not scalarize here. 
-         recursively_replace(t->getNode(),NULL,-1,t,accessed_fields,dead_load_stores,candidate_bci);
-         //traceMsg(comp(),"%d path node after replace is:\n",cnt);
-         //getDebug()->print(comp()->getOutFile(), t);
-      }
-      else
-      {
-         traceMsg(comp(),"Removed treetops are:\n");
-         for(TR::TreeTop* t1: removed_treetops)
-            getDebug()->print(comp()->getOutFile(), t1);
-         //heapify the object. Call the routine needed.
-         //simply store back to the heap object fields. Insert more treetops for fieldcopying.
-         for(std::pair<int,TR::DataType> x: accessed_fields)
-         {
-            int field = x.first;
-            if(load_added_on_field[candidate_bci][t].find(field) != load_added_on_field[candidate_bci][t].end())
-               continue;//no need to reload
-            load_added_on_field[candidate_bci][t].insert(field);
-            TR::SymbolReference* sym_ref = comp()->getSymRefTab()->getSymRef(field);//field load symbol reference
-            //Optional: Do we need to check the type of the node and accordingly 
-            //check if it was a write barrier or an ordinary receiver. Yes, check the datatype to determine if field type or no.
-            //traceMsg(comp(),"Field exists with symref %d\n",sym_ref->getReferenceNumber());
-            TR::Node* restoring_node = receiving_object->getNode();
-            if(restoring_node->getOpCode().isResolveCheck() || restoring_node->getOpCode().isNullCheck() || restoring_node->getOpCodeValue() == TR::treetop)
-               restoring_node = restoring_node->getFirstChild();
-            if(restoring_node->getOpCode().isIndirect() && restoring_node->getOpCode().isWrtBar())
-               restoring_node = restoring_node->getFirstChild();//3 children, 1st and 3rd are the same. 
-            TR::DataType d = x.second;  
-            TR::Node* first_child = TR::Node::create(TR::aload,0);
-            first_child->setDataType(TR::Address);
-            TR::Node* second_child = TR::Node::create(comp()->il.opCodeForDirectLoad(d),0);
-            second_child->setDataType(d);
-            //traceMsg(comp(),"My restoring node before call has %s,symref %d\n",restoring_node->getOpCode().getName(),restoring_node->getSymbolReference()->getReferenceNumber());
-            first_child->setSymbolReference(restoring_node->getSymbolReference());
-            second_child->setSymbolReference(symref_map[candidate_bci].find(field)->second);
-            //traceMsg(comp(),"Symrefs are %d and %d\n",first_child->getSymbolReference()->getReferenceNumber(),second_child->getSymbolReference()->getReferenceNumber());
-            TR::Node* store_node;
-            if(d.isAddress())
-            {
-               //traceMsg(comp(),"Yes, got inside wrtbar!\n");
-               //this is an instance field. Have to generate a write barrier node for it,with a compressed refs node. 
-               store_node = TR::Node::create(TR::awrtbari,3);//wrtbari is for write to instance fields.
-               store_node->setDataType(d);
-               store_node->setSymbolReference(sym_ref);
-               store_node->setAndIncChild(0,first_child);
-               store_node->setAndIncChild(1,second_child);
-               store_node->setAndIncChild(2,first_child);//third child same as first?
-               TR::Node* compresedRefsNode = TR::Node::create(TR::compressedRefs,2);
-               compresedRefsNode->setDataType(d);//address. Do we need to set a symref?
-               //traceMsg(comp(),"Set Datatype for CREF\n");
-               TR::Node* lconst_node = TR::Node::create(TR::lconst,0);
-               lconst_node->setConstValue(0);
-               lconst_node->setDataType(TR::Int64);
-               //traceMsg(comp(),"Set Datatype for l_const\n");
-               compresedRefsNode->setAndIncChild(0,store_node);
-               compresedRefsNode->setAndIncChild(1,lconst_node);
-               TR::TreeTop* comp_ref_tt = TR::TreeTop::create(comp());
-               comp_ref_tt->setNode(compresedRefsNode);
-               //traceMsg(comp(),"SetNode CREF\n");
-               //traceMsg(comp(),"For instance field, pre-insertion\n");
-               t->insertBefore(comp_ref_tt);
-               //traceMsg(comp(),"For instance field, post-insertion.\n");
-            }
-            else
-            {
-               //traceMsg(comp(),"Yes, got inside astore!\n");
-               store_node = TR::Node::create(comp()->il.opCodeForIndirectStore(d),2);
-               store_node->setSymbolReference(sym_ref);
-               //traceMsg(comp(),"Set Datatype\n");
-               store_node->setAndIncChild(0,first_child);
-               store_node->setAndIncChild(1,second_child);
-               //traceMsg(comp(),"Add children\n");
-               TR::TreeTop* restore_tt = TR::TreeTop::create(comp());
-               TR::Node* treetop_node = TR::Node::create(TR::treetop,1);
-               treetop_node->setAndIncChild(0,store_node);
-               restore_tt->setNode(treetop_node);
-               //traceMsg(comp(),"For scalar field, pre-insertion.\n");
-               t->insertBefore(restore_tt);
-               //traceMsg(comp(),"For scalar field, post-insertion.\n");
-               //getDebug()->print(comp()->getOutFile(),restore_tt);
-            }
-         }  
-      }
-   }*/
 }
 
 
 int32_t TR_EscapeAnalysis::perform()
    {
    do
-      { 
+   { 
       if(feGetEnv("SPLIT_SCALARIZATION") == NULL)
          break;//prevents a bootstrap error. 
-   traceMsg(comp(),"Starting Scalarization pass %d!\n",manager()->numPassesCompleted());
-   treetops_to_inspect.clear();
-   scalarize_count.clear();
-   field_access_count.clear();
-   max_path = 0;
-   symref_map.clear();
-   load_added_on_field.clear();
-   store_added_on_field.clear();
-   parameter_map.clear();
-   removed_treetops.clear();
-   null_checked_fields.clear();
-   endpoint_pairs.clear();
-   //traceMsg(comp(),"Getenv succeeded for %s!\n",comp()->signature());
-   if(!process_escape_information())
-   {
-      //traceMsg(comp(),"Cannot apply scalarization on %s due to lack of static escape information!\n",comp()->signature());
-      return 0;
-   }
-   bool has_throw_statements = false;
-   //traceMsg(comp(),"Successfully processed escape information for %s!\n",comp()->signature());
-   std::list<TR::Block*> l;
-   std::map<TR::Block*,bool> visited;
-   std::map<int,TR::TreeTop*> candidates;
-   //BCI + the node that first receives it. 
-   std::map<int,std::list<TR::TreeTop*>> end_points;
-   TR::TreeTop* start_tt;//the first treetop
-   l.push_back(comp()->getStartBlock());
-   //detect candidates.
-   
-   while(!l.empty())
-   {
-      TR::Block* bl = l.front();
-      if(bl->getNumber() == 2)
-         start_tt = bl->getEntry();//starting TreeTop. Is this assumption true?
-      //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
-      l.pop_front();
-      TR::TreeTop* t = bl->getEntry();
-      if(t == NULL)
+      traceMsg(comp(),"Starting Scalarization pass %d!\n",manager()->numPassesCompleted());
+      treetops_to_inspect_between_endpoints.clear();
+      nodes_to_replace_between_endpoints.clear();
+      accessed_fields_between_endpoints.clear();
+      scalarize_count.clear();
+      field_access_count.clear();
+      max_path = 0;
+      symref_map.clear();
+      load_added_on_field.clear();
+      store_added_on_field.clear();
+      parameter_map.clear();
+      removed_treetops.clear();
+      null_checked_fields.clear();
+      //traceMsg(comp(),"Getenv succeeded for %s!\n",comp()->signature());
+      if(!process_escape_information())
       {
-         //traceMsg(comp(),"Block %d has no entry points!\n",bl->getNumber());
-         //directly go to children if any.
+         //traceMsg(comp(),"Cannot apply scalarization on %s due to lack of static escape information!\n",comp()->signature());
+         return 0;
+      }
+      bool has_throw_statements = false;
+      //traceMsg(comp(),"Successfully processed escape information for %s!\n",comp()->signature());
+      std::list<TR::Block*> l;
+      std::map<TR::Block*,bool> visited;
+      std::map<int,TR::TreeTop*> candidates;
+      //BCI + the node that first receives it. 
+      std::map<int,std::list<TR::TreeTop*>> end_points;
+      TR::TreeTop* start_tt;//the first treetop
+      l.push_back(comp()->getStartBlock());
+      //detect candidates.
+      
+      while(!l.empty())
+      {
+         TR::Block* bl = l.front();
+         if(bl->getNumber() == 2)
+            start_tt = bl->getEntry();//starting TreeTop. Is this assumption true?
+         //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
+         l.pop_front();
+         TR::TreeTop* t = bl->getEntry();
+         if(t == NULL)
+         {
+            //traceMsg(comp(),"Block %d has no entry points!\n",bl->getNumber());
+            //directly go to children if any.
+            for(TR::CFGEdge* succ: bl->getSuccessors())
+            {
+               TR::Block* bl1 = succ->getTo()->asBlock();
+               if(!visited[bl1])
+               {
+                  visited[bl1] = true;
+                  l.push_back(bl1);
+               }
+            }
+            continue;
+         }
+         while(true)
+         {
+            //comp()->getDebug()->print(comp()->getOutFile(),t);
+            TR::Node* n = t->getNode();
+            if((n->getOpCodeValue() == TR::treetop) || n->getOpCode().isResolveCheck() || n->getOpCode().isNullCheck())
+               n = n->getFirstChild();
+            if(n->getOpCode().isStoreDirect())//check first child
+            {
+               TR::Node* n1 = n->getFirstChild();
+               int candidate_bci = n1->getByteCodeIndex();
+               if((n1->getOpCodeValue() == TR::New) && is_thread_local(candidate_bci) && !is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
+               {
+                  if(candidates.find(candidate_bci) == candidates.end())
+                     candidates[candidate_bci] = t;//this will always happen first. 
+               }
+            }
+            else if(n->getOpCode().isWrtBar())
+            {
+               //can be a candidate as well. (a.f = b) where b is an object itself. This will technically be weeded out in the points-to
+               //check.
+               TR::Node* n2 = n->getSecondChild();
+               int candidate_bci = n2->getByteCodeIndex();
+               if((n2->getOpCodeValue() == TR::New) && is_thread_local(candidate_bci) && !is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
+               {
+                  if(candidates.find(candidate_bci) == candidates.end())
+                     candidates[candidate_bci] = t;
+               }
+            }
+            else if(n->getOpCodeValue() == TR::BBEnd)
+               break;//this basic block has ended.
+            t = t->getNextTreeTop();
+         } 
+         
          for(TR::CFGEdge* succ: bl->getSuccessors())
          {
             TR::Block* bl1 = succ->getTo()->asBlock();
+            //traceMsg(comp(),"Block %d succeeds Block %d\n",bl1->getNumber(),bl->getNumber());
             if(!visited[bl1])
             {
                visited[bl1] = true;
+               //traceMsg(comp(),"Added block %d now!\n",bl1->getNumber());
                l.push_back(bl1);
             }
-         }
-         continue;
+         }    
       }
-      while(true)
+      /*
+         We check the parameters and see of the can be scalarized too.  
+      */
+      if(feGetEnv("PARAMS") != NULL)
       {
-         //comp()->getDebug()->print(comp()->getOutFile(),t);
-         TR::Node* n = t->getNode();
-         if((n->getOpCodeValue() == TR::treetop) || n->getOpCode().isResolveCheck() || n->getOpCode().isNullCheck())
-            n = n->getFirstChild();
-         if(n->getOpCode().isStoreDirect())//check first child
+         //start_tt = comp()->getStartTree();
+         for(int candidate_bci: nonescaping_candidates[comp()->signature()])
          {
-            TR::Node* n1 = n->getFirstChild();
-            int candidate_bci = n1->getByteCodeIndex();
-            if((n1->getOpCodeValue() == TR::New) && is_thread_local(candidate_bci) && !is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
+            //look for scalarizable parameters.
+            if(candidate_bci < 0)
             {
-               if(candidates.find(candidate_bci) == candidates.end())
-                  candidates[candidate_bci] = t;//this will always happen first. 
-            }
-         }
-         else if(n->getOpCode().isWrtBar())
-         {
-            //can be a candidate as well. (a.f = b) where b is an object itself. This will technically be weeded out in the points-to
-            //check.
-            TR::Node* n2 = n->getSecondChild();
-            int candidate_bci = n2->getByteCodeIndex();
-            if((n2->getOpCodeValue() == TR::New) && is_thread_local(candidate_bci) && !is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
-            {
-               if(candidates.find(candidate_bci) == candidates.end())
-                  candidates[candidate_bci] = t;
-            }
-         }
-         else if(n->getOpCodeValue() == TR::BBEnd)
-            break;//this basic block has ended.
-         t = t->getNextTreeTop();
-      } 
-      
-      for(TR::CFGEdge* succ: bl->getSuccessors())
-      {
-         TR::Block* bl1 = succ->getTo()->asBlock();
-         //traceMsg(comp(),"Block %d succeeds Block %d\n",bl1->getNumber(),bl->getNumber());
-         if(!visited[bl1])
-         {
-            visited[bl1] = true;
-            //traceMsg(comp(),"Added block %d now!\n",bl1->getNumber());
-            l.push_back(bl1);
-         }
-      }    
-   }
-   /*
-      We check the parameters and see of the can be scalarized too.  
-   */
-   if(feGetEnv("PARAMS") != NULL)
-   {
-      //start_tt = comp()->getStartTree();
-      for(int candidate_bci: nonescaping_candidates[comp()->signature()])
-      {
-         //look for scalarizable parameters.
-         if(candidate_bci < 0)
-         {
-            //this is a parameter. Check if it can be scalarized possibly. 
-            if(!is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
-            {
-               candidates[candidate_bci] = NULL;
-               end_points[candidate_bci].push_back(start_tt);
+               //this is a parameter. Check if it can be scalarized possibly. 
+               if(!is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
+               {
+                  candidates[candidate_bci] = start_tt;//this has to be reconciled later. 
+                  end_points[candidate_bci].push_back(start_tt);
+               }
             }
          }
       }
-   }
-   /*Scalarizing params is unsafe due to arbitrary aliasing that can occur.*/
-   //traceMsg(comp(),"Finished candidate detection!\n");  
-   visited.clear();
-   visited[comp()->getStartBlock()] = true;
-   l.push_back(comp()->getStartBlock());
-   while(!l.empty())
-   {
-      TR::Block* bl = l.front();
-      has_throw_statements |= bl->isCatchBlock();
-      //traceMsg(comp(),"Processing Block %d!\n",bl->getNumber());
-      //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
-      l.pop_front();
-      TR::TreeTop* t = bl->getEntry();
-      if(t == NULL)
+      /*Scalarizing params is unsafe due to arbitrary aliasing that can occur.*/
+      //traceMsg(comp(),"Finished candidate detection!\n");  
+      visited.clear();
+      visited[comp()->getStartBlock()] = true;
+      l.push_back(comp()->getStartBlock());
+      while(!l.empty())
       {
-         //traceMsg(comp(),"Block %d has no entry!\n",bl->getNumber());
+         TR::Block* bl = l.front();
+         has_throw_statements |= bl->isCatchBlock();
+         //traceMsg(comp(),"Processing Block %d!\n",bl->getNumber());
+         //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
+         l.pop_front();
+         TR::TreeTop* t = bl->getEntry();
+         if(t == NULL)
+         {
+            //traceMsg(comp(),"Block %d has no entry!\n",bl->getNumber());
+            for(TR::CFGEdge* succ: bl->getSuccessors())
+            {
+               TR::Block* bl1 = succ->getTo()->asBlock();
+               if(!visited[bl1])
+               {
+                  visited[bl1] = true;
+                  //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
+                  l.push_back(bl1);
+               }
+            }
+            for(TR::CFGEdge* succ: bl->getExceptionSuccessors())
+            {
+               TR::Block* bl1 = succ->getTo()->asBlock();
+               if(!visited[bl1])
+               {
+                  visited[bl1] = true;
+                  //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
+                  l.push_back(bl1);
+               }
+            }
+            continue;
+         }
+         while(true)
+         {
+            //comp()->getDebug()->print(comp()->getOutFile(),t);
+            TR::Node* n = t->getNode();
+            if((n->getOpCodeValue() == TR::treetop) || n->getOpCode().isResolveCheck() || n->getOpCode().isNullCheck())
+               n = n->getFirstChild();
+            if(n->getOpCode().isCall())
+            {
+               //constructor calls have to be separately filtered out here. This can be replaced by 
+               //escape information and reworked.  
+               for(std::pair<int,TR::TreeTop*> p: candidates)
+               {
+                  if(is_reachable(p.first,n))
+                     end_points[p.first].push_back(t);
+               }
+            }
+            else if(n->getOpCode().isReturn())
+            {
+               //all candidates escape here. 
+               for(std::pair<int,TR::TreeTop*> t2: candidates)
+                  end_points[t2.first].push_back(t);
+            }
+            else if(n->getOpCodeValue() == TR::athrow)
+            {
+               has_throw_statements = true;
+               //all candidates escape here. 
+               for(std::pair<int,TR::TreeTop*> t2: candidates)
+                  end_points[t2.first].push_back(t);
+            }
+            else if(n->getOpCodeValue() == TR::BBEnd)
+               break;
+            t = t->getNextTreeTop();
+         }
          for(TR::CFGEdge* succ: bl->getSuccessors())
          {
             TR::Block* bl1 = succ->getTo()->asBlock();
@@ -1586,114 +1462,69 @@ int32_t TR_EscapeAnalysis::perform()
                //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
                l.push_back(bl1);
             }
-         }
-         continue;
+         }    
       }
-      while(true)
+      
+      for(auto it: end_points)
       {
-         //comp()->getDebug()->print(comp()->getOutFile(),t);
-         TR::Node* n = t->getNode();
-         if((n->getOpCodeValue() == TR::treetop) || n->getOpCode().isResolveCheck() || n->getOpCode().isNullCheck())
-            n = n->getFirstChild();
-         if(n->getOpCode().isCall())
+         traceMsg(comp(),"\nFor BCI %d, alloc site\n",it.first);
+         comp()->getDebug()->print(comp()->getOutFile(),candidates[it.first]); 
+         traceMsg(comp(),"Endpoints:\n");
+         for(auto it1: it.second)
          {
-            //constructor calls have to be separately filtered out here. This can be replaced by 
-            //escape information and reworked.  
-            for(std::pair<int,TR::TreeTop*> p: candidates)
+            getDebug()->print(comp()->getOutFile(), it1);
+         }
+      }
+      if(has_throw_statements)
+      {
+         traceMsg(comp(),"Avoiding scalarization on %s due to throw/catch statements!\n",comp()->signature());
+         return 0;
+      }
+      comp()->dumpMethodTrees("Trees before scalarizing");
+      for(std::pair<int,TR::TreeTop*> t: candidates)
+      {
+         //backtrack using DFS
+         std::set<TR::TreeTop*> ep_set;
+         for(TR::TreeTop* end_point: end_points[t.first])
+            ep_set.insert(end_point);
+         TR::TreeTop* receiving_treetop;
+         if(t.second != start_tt)
+            receiving_treetop = t.second;
+         else
+         {
+            receiving_treetop = TR::TreeTop::create(comp());
+            TR::Node* ghost_node = TR::Node::create(TR::astore,1);
+            receiving_treetop->setNode(ghost_node);
+         }
+         for(TR::TreeTop* end_point: end_points[t.first])
+         { 
+            if(end_point == start_tt)  
+               continue;//need not backtrack unnecessarily from here.
+            accessed_fields_between_endpoints.clear();
+            treetops_to_inspect_between_endpoints.clear();
+            nodes_to_replace_between_endpoints.clear();
+            std::set<TR::Block*> visited;
+            std::set<TR::Block*> reaches_endpoint;
+            std::set<TR::TreeTop*> processed_treetops;
+            std::map<TR::Block*,TR::Block*> parent;
+            traverse_between_endpoints(t.first,end_point,end_point,t.second,parent,visited,reaches_endpoint,processed_treetops,ep_set);
+            if(receiving_treetop->getNode()->getSymbolReference() == NULL)
             {
-               if(is_reachable(p.first,n))
-                  end_points[p.first].push_back(t);
+               //parameter object. Add a symref for this candidate. 
+               receiving_treetop->getNode()->setSymbolReference(parameter_map[t.first]);
             }
-         }
-         else if(n->getOpCode().isReturn())
-         {
-            //all candidates escape here. 
-            for(std::pair<int,TR::TreeTop*> t2: candidates)
-               end_points[t2.first].push_back(t);
-         }
-         else if(n->getOpCodeValue() == TR::athrow)
-         {
-            has_throw_statements = true;
-            //all candidates escape here. 
-            for(std::pair<int,TR::TreeTop*> t2: candidates)
-               end_points[t2.first].push_back(t);
-         }
-         else if(n->getOpCodeValue() == TR::BBEnd)
-            break;
-         t = t->getNextTreeTop();
-      }
-      for(TR::CFGEdge* succ: bl->getSuccessors())
-      {
-         TR::Block* bl1 = succ->getTo()->asBlock();
-         if(!visited[bl1])
-         {
-            visited[bl1] = true;
-            //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
-            l.push_back(bl1);
+            std::pair<TR::TreeTop*,TR::TreeTop*> p1 = std::make_pair(end_point,t.second);
+            scalarize(t.first,receiving_treetop,t.second,end_point,accessed_fields_between_endpoints[p1],nodes_to_replace_between_endpoints[p1]);
+            clean_treetops(end_point,t.second);//clean-up operation
          }
       }
-      for(TR::CFGEdge* succ: bl->getExceptionSuccessors())
-      {
-         TR::Block* bl1 = succ->getTo()->asBlock();
-         if(!visited[bl1])
-         {
-            visited[bl1] = true;
-            //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
-            l.push_back(bl1);
-         }
-      }    
-   }
-   
-   // for(auto it: end_points)
-   // {
-   //    traceMsg(comp(),"\nFor BCI %d, alloc site\n",it.first);
-   //    if(candidates[it.first] != NULL)
-   //       comp()->getDebug()->print(comp()->getOutFile(),candidates[it.first]);
-   //    else
-   //       comp()->getDebug()->print(comp()->getOutFile(),start_tt);//parameter. Find the symref later. 
-   //    traceMsg(comp(),"Endpoints:\n");
-   //    for(auto it1: it.second)
-   //    {
-   //       getDebug()->print(comp()->getOutFile(), it1);
-   //    }
-   // }
-   if(has_throw_statements)
-   {
-      traceMsg(comp(),"Avoiding scalarization on %s due to throw/catch statements!\n",comp()->signature());
+      update_points_to_info();
+      comp()->dumpMethodTrees("Trees after scalarizing");
+      traceMsg(comp(),"Scalarized fields: %d\nAccessed fields:%d\n",scalarize_count.size(),field_access_count.size());
+      //manager()->incNumPassesCompleted();//pass of EA over!
       return 0;
    }
-   comp()->dumpMethodTrees("Trees before scalarizing");
-   for(std::pair<int,TR::TreeTop*> t: candidates)
-   {
-      //backtrack using DFS
-      endpoint_pairs.clear();
-      std::vector<TR::TreeTop*> path_to_node;
-      std::map<int,int> accessed_fields;
-      std::set<int> inserted_fields;
-      std::map<TR::Block*,int> visit_count;
-      std::set<TR::Node*> nodes_to_replace;
-      for(TR::TreeTop* end_point: end_points[t.first])
-      {
-         visit_count.clear(); 
-         if(end_point == start_tt)  
-            continue;//need not backtrack unnecessarily from here. 
-         //traceMsg(comp(),"Trying to traverse for:\n");
-         //comp()->getDebug()->print(comp()->getOutFile(),end_point);
-         traverse_graph(t.first,t.second,end_point,path_to_node,accessed_fields,inserted_fields,nodes_to_replace,visit_count,end_points[t.first]);//process every path and replace field accesses.
-      }
-      for(std::pair<TR::TreeTop*,TR::TreeTop*> pair_of_critical_points: endpoint_pairs)
-      {
-         insert_missing_stores(t.first,pair_of_critical_points.first,pair_of_critical_points.second,t.second);
-      }
-   }
-   clean_treetops();
-   update_points_to_info();
-   comp()->dumpMethodTrees("Trees after scalarizing");
-   traceMsg(comp(),"Scalarized fields: %d\nAccessed fields:%d\nMaximum path size:%d\n",scalarize_count.size(),field_access_count.size(),max_path);
-   //manager()->incNumPassesCompleted();//pass of EA over!
-   return 0;
-}
-while(false);
+   while(false);
    if (comp()->isOptServer() && (comp()->getMethodHotness() <= warm))
       return 0;
 

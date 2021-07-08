@@ -462,12 +462,12 @@ class TR_EscapeAnalysis : public TR::Optimization
 
    protected:
 
-   void traverse_graph(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* t,std::vector<TR::TreeTop*> curr_path,std::map<int,int> accessed_fields,std::set<int> inserted_fields,std::set<TR::Node*> nodes_to_replace,std::map<TR::Block*,int> visit_count,std::list<TR::TreeTop*>& end_points);
-   void scalarize(int candidate_bci, TR::TreeTop* receiving_object,std::vector<TR::TreeTop*>& path,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace);
+   void traverse_between_endpoints(int candidate_bci,TR::TreeTop* current_tt,TR::TreeTop* source, TR::TreeTop* destination,std::map<TR::Block*,TR::Block*>& parent,std::set<TR::Block*>& visited,std::set<TR::Block*>& reaches_endpoint,std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points);
+   void scalarize(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* start_point,TR::TreeTop* end_point,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace);
    void recursively_replace(TR::Node* n, TR::Node* parent,int child_number,TR::TreeTop* t,std::map<int,int>& accessed_fields,std::set<TR::Node*>& dead_loads_stores,int candidate_bci);
-   void recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<int>& inserted_fields,std::set<TR::Node*>& nodes_to_replace);
-   void place_loads_on_entry(int candidate_bci,TR::TreeTop* receivng_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
-   void place_stores_on_exit(int candidate_bci,TR::TreeTop* receivng_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
+   void recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace,std::set<TR::TreeTop*>& treetops_to_inspect);
+   void place_loads_on_entry(int candidate_bci,TR::TreeTop* receiving_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
+   void place_stores_on_exit(int candidate_bci,TR::TreeTop* receiving_object,TR::TreeTop* t,std::map<int,int>& accessed_fields);
    void insert_missing_stores(int candidate_bci,TR::TreeTop* first_treetop,TR::TreeTop* last_treetop,TR::TreeTop* receiving_object);
    bool is_reachable(int candidate_bci, TR::Node* curr_node);
    bool is_thread_local(int candidate_bci);
@@ -475,7 +475,7 @@ class TR_EscapeAnalysis : public TR::Optimization
    bool is_not_aliased(int candidate_bci);
    bool process_escape_information();
    void update_points_to_info();
-   void clean_treetops();
+   void clean_treetops(TR::TreeTop* source, TR::TreeTop* destination);
    std::map<std::string,std::set<int>> nonescaping_candidates;//candidates that can be considered for scalarization.
    std::map<std::string,std::map<int,std::set<int>>> dereferenced_fields;//Describes what candidates are accessed under which field reference.
    std::map<std::string,std::map<int,std::set<int>>> function_calls;//Describes reachable candidates at a function call site.
@@ -488,13 +488,13 @@ class TR_EscapeAnalysis : public TR::Optimization
    std::map<int,std::map<TR::TreeTop*,std::set<int>>> store_added_on_field;//Describes if the current candidate has had its field stored on exit.
    std::map<int,std::set<int>> null_checked_fields;//Describes if a particular field under a particular candidate is being null checked. 
    std::map<int,TR::SymbolReference*> parameter_map;//for every param, store the symref of the receiver.
-   std::set<std::pair<TR::TreeTop*,TR::TreeTop*>> endpoint_pairs;
-   std::set<TR::TreeTop*> treetops_to_inspect;
    std::set<TR::Node*> scalarize_count;
    std::set<TR::Node*> field_access_count;//count across all candidates
    int max_path;
-
-   
+   std::map<TR::Block*,std::map<int,int>> accessed_fields_at_block;
+   std::map<std::pair<TR::TreeTop*,TR::TreeTop*>,std::set<TR::Node*>> nodes_to_replace_between_endpoints;
+   std::map<std::pair<TR::TreeTop*,TR::TreeTop*>,std::set<TR::TreeTop*>> treetops_to_inspect_between_endpoints;
+   std::map<std::pair<TR::TreeTop*,TR::TreeTop*>,std::map<int,int>> accessed_fields_between_endpoints;
    enum restrictionType { MakeNonLocal, MakeContiguous, MakeObjectReferenced };
 
    int32_t  performAnalysisOnce();
