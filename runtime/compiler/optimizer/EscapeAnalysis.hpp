@@ -461,7 +461,10 @@ class TR_EscapeAnalysis : public TR::Optimization
    virtual const char * optDetailString() const throw();
 
    protected:
-
+   
+   void compute_dominators();
+   bool is_loop_header(TR::Block*);
+   void traverse_loop(int candidate_bci, TR::Block* loop_header, TR::TreeTop* current_tt, TR::TreeTop* source, TR::TreeTop* destination, std::map<TR::Block*,TR::Block*>& parent, std::set<TR::Block*>& visited, std::set<TR::Block*>& reaches_endpoint, std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points);
    void traverse_between_endpoints(int candidate_bci,TR::TreeTop* current_tt,TR::TreeTop* source, TR::TreeTop* destination,std::map<TR::Block*,TR::Block*>& parent,std::set<TR::Block*>& visited,std::set<TR::Block*>& reaches_endpoint,std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points);
    void scalarize(int candidate_bci, TR::TreeTop* receiving_object,TR::TreeTop* start_point,TR::TreeTop* end_point,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace);
    void recursively_replace(TR::Node* n, TR::Node* parent,int child_number,TR::TreeTop* t,std::map<int,int>& accessed_fields,std::set<TR::Node*>& dead_loads_stores,int candidate_bci);
@@ -490,6 +493,7 @@ class TR_EscapeAnalysis : public TR::Optimization
    std::map<int,TR::SymbolReference*> parameter_map;//for every param, store the symref of the receiver.
    std::set<TR::Node*> scalarize_count;
    std::set<TR::Node*> field_access_count;//count across all candidates
+   std::map<TR::Block*, std::set<TR::Block*>> dominators;
    int max_path;
    std::map<TR::Block*,std::map<int,int>> accessed_fields_at_block;
    std::map<std::pair<TR::TreeTop*,TR::TreeTop*>,std::set<TR::Node*>> nodes_to_replace_between_endpoints;

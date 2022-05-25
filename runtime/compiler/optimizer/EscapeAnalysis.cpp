@@ -213,50 +213,111 @@ bool TR_EscapeAnalysis::isImmutableObject(Candidate *candidate)
    candidate->_isImmutable = b;
    return b;
    }
+
+
+void TR_EscapeAnalysis::traverse_loop(int candidate_bci, TR::Block* loop_header, TR::TreeTop* current_tt, TR::TreeTop* source, TR::TreeTop* destination, std::map<TR::Block*,TR::Block*>& parent, std::set<TR::Block*>& visited, std::set<TR::Block*>& reaches_endpoint, std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points)
+{
+   /*
+   * Traverses a loop that starts at the designated loop header block and finishes at that same block. The logic is simple: we should be able to complete the loop without 
+     having to encounter other endpoints. 
+   * This function attempts to traverse only those loops that are part of valid paths.
+   * It is assumed by default that source and destination will be in the same regions of the CFG, because otherwise, incorrect scalarization may happen in the event of a loop body not being taken.
+   */
+   TR::Block* curr_block = current_tt->getEnclosingBlock(); // We are traversing this block.
+   visited.insert(curr_block);
+   TR::TreeTop* curr = current_tt;
+   while(curr->getNode()->getOpCodeValue() != TR::BBStart && end_points.find(curr) == end_points.end())
+   {
+      curr = curr->getPrevTreeTop();
+   }
+   if(end_points.find(curr) != end_points.end())
+      return; // We reached another endpoint of this candidate. This path cannot be completed.
+   for(TR::CFGEdge* e: curr_block->getPredecessors()){
+      TR::Block* b = e->getFrom()->asBlock();
+      if(visited.find(b) != visited.end())
+      {
+         // We have completed the loop by reaching either the header or a part of another valid path.
+         if(reaches_endpoint.find(b) != reaches_endpoint.end()){
+            std::map<int,int> accessed_fields;
+            std::set<TR::Node*> nodes_to_replace;
+            std::set<TR::TreeTop*> treetops_to_inspect;
+            TR::TreeTop* curr_tt = curr_block->getEntry();
+            TR::Block* current_block = curr_block;
+            do{
+               reaches_endpoint.insert(current_block);
+               while(curr_tt->getNode()->getOpCodeValue() != TR::BBEnd){
+                  processed_treetops.insert(curr_tt);
+                  bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr_tt) != inserted_treetops[comp()->signature()].end());
+                  recursively_detect(candidate_bci,curr_tt->getNode(),curr_tt,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
+                  curr_tt = curr_tt->getNextTreeTop();
+               }
+               // if there are nested loop bodies, they have to be traversed, since the header is part of a valid path. 
+               for(TR::CFGEdge* e: current_block->getPredecessors()){
+                  TR::Block* pred = e->getFrom()->asBlock();
+                  if((dominators[pred].find(current_block) != dominators[pred].end()) && (visited.find(pred) == visited.end())){
+                     // back edge. Traverse the loop.
+                     traverse_loop(candidate_bci,current_block,pred->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
+                  }
+               } 
+               if(parent.find(current_block) == parent.end())
+                  break;
+               current_block = parent[current_block];
+               curr_tt = current_block->getEntry();
+            }while(processed_treetops.find(curr_tt) == processed_treetops.end());
+            std::pair<TR::TreeTop*,TR::TreeTop*> endpoint_pair = std::make_pair(source,destination);
+            for(std::pair<int,int> p: accessed_fields)
+               accessed_fields_between_endpoints[endpoint_pair][p.first] += p.second;
+            for(TR::Node* n: nodes_to_replace)
+               nodes_to_replace_between_endpoints[endpoint_pair].insert(n);
+            for(TR::TreeTop* t: treetops_to_inspect)
+               treetops_to_inspect_between_endpoints[endpoint_pair].insert(t);
+         }
+      }
+      else if(dominators[b].find(curr_block) == dominators[b].end()){
+         // Back-edges within this existing loop are to be included only if we are sure that the loop header is part of a valid path.
+         traverse_loop(candidate_bci,loop_header,b->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
+      }
+   }
+}
 void TR_EscapeAnalysis::traverse_between_endpoints(int candidate_bci,TR::TreeTop* current_tt,TR::TreeTop* source, TR::TreeTop* destination,std::map<TR::Block*,TR::Block*>& parent,std::set<TR::Block*>& visited,std::set<TR::Block*>& reaches_endpoint,std::set<TR::TreeTop*>& processed_treetops,std::set<TR::TreeTop*>& end_points)
 {
-   TR::Block* bl = current_tt->getEnclosingBlock();
-   visited.insert(bl);
+   TR::Block* curr_block = current_tt->getEnclosingBlock();
+   visited.insert(curr_block);
    TR::TreeTop* tt = current_tt;
-   while(tt->getNode()->getOpCodeValue() != TR::BBStart && tt != destination)
-        tt = tt->getPrevTreeTop();
+   do
+   {
+      tt = tt->getPrevTreeTop(); // Ensures that the first iteration is always taken.
+   }
+   while((tt->getNode()->getOpCodeValue() != TR::BBStart) && (end_points.find(tt) == end_points.end()));
    if(tt == destination)
    {
-      traceMsg(comp(),"Marking block as reachable!\n");
-      reaches_endpoint.insert(bl);
-      TR::TreeTop* curr = current_tt;//where we started from.
+      // we have reached the endpoint.
+      TR::TreeTop* curr_tt = tt;//where we started from.
+      TR::Block* current_block = curr_block;
       std::map<int,int> accessed_fields;
       std::set<TR::Node*> nodes_to_replace;
       std::set<TR::TreeTop*> treetops_to_inspect;
-      bool processed = false;
-      while(true)
-      {
-         while(curr->getNode()->getOpCodeValue() != TR::BBStart && curr != destination)
-         {
-            if(processed_treetops.find(curr) != processed_treetops.end())
-            {
-               processed = true;
-               break;
+      do{
+            reaches_endpoint.insert(current_block);
+            while(curr_tt->getNode()->getOpCodeValue() != TR::BBEnd && curr_tt != source){
+               processed_treetops.insert(curr_tt);
+               bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr_tt) != inserted_treetops[comp()->signature()].end());
+               recursively_detect(candidate_bci,curr_tt->getNode(),curr_tt,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
+               curr_tt = curr_tt->getNextTreeTop();
             }
-            processed_treetops.insert(curr);
-            bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr) != inserted_treetops[comp()->signature()].end());
-            comp()->getDebug()->print(comp()->getOutFile(),curr);
-            recursively_detect(candidate_bci,curr->getNode(),curr,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
-            if(curr == destination)
-            {
-               processed = true;
-               break;
+            // If there are any back edges and this current block is a loop header, complete the loop.
+            for(TR::CFGEdge* e: current_block->getPredecessors()){
+               TR::Block* pred = e->getFrom()->asBlock();
+               if((dominators[pred].find(current_block) != dominators[pred].end()) && (visited.find(pred) == visited.end())){
+                  // back edge. Traverse the loop.
+                  traverse_loop(candidate_bci,current_block,pred->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
+               }
             }
-            curr = curr->getPrevTreeTop();
-         }
-         if(processed)
-            break;
-         if(parent.find(bl) == parent.end())
-            break;
-         curr = parent[bl]->getExit();
-         if(curr == NULL)
-            break;
-      }
+            if(parent.find(current_block) == parent.end())
+               break;
+            current_block = parent[current_block];
+            curr_tt = current_block->getEntry();
+         }while(processed_treetops.find(curr_tt) == processed_treetops.end());
       std::pair<TR::TreeTop*,TR::TreeTop*> endpoint_pair = std::make_pair(source,destination);
       for(std::pair<int,int> p: accessed_fields)
          accessed_fields_between_endpoints[endpoint_pair][p.first] += p.second;
@@ -267,52 +328,44 @@ void TR_EscapeAnalysis::traverse_between_endpoints(int candidate_bci,TR::TreeTop
       return;
    }
    else if(end_points.find(tt) != end_points.end())
-      return;//cannot traverse backwards anymore. 
+      return;//cannot traverse backwards anymore in this block between the given source and destination. 
    else
    {
-      for(TR::CFGEdge* e: bl->getPredecessors())
+      //Ignore back edges and find the path. 
+      for(TR::CFGEdge* e: curr_block->getPredecessors()) 
       {
-         TR::Block* bl1 = e->getFrom()->asBlock();
-         if(visited.find(bl1) != visited.end())
+         TR::Block* b = e->getFrom()->asBlock();
+         if(dominators[b].find(curr_block) == dominators[b].end()){
+         if(visited.find(b) != visited.end())
          {
-            if(reaches_endpoint.find(bl1) != reaches_endpoint.end())
-            {
-               //traverse until complete.
-               traceMsg(comp(),"Can reach endpoint via a visited member at %d!\n",bl1->getNumber());
-               reaches_endpoint.insert(bl);
-               TR::Block* current_block = bl;
-               TR::TreeTop* curr = bl->getExit();//where we started from.
+            if(reaches_endpoint.find(b) != reaches_endpoint.end()){
+               // the endpoint is reachable via this path.
+               TR::TreeTop* curr_tt = tt;//where we started from.
+               TR::Block* current_block = curr_block;
                std::map<int,int> accessed_fields;
                std::set<TR::Node*> nodes_to_replace;
                std::set<TR::TreeTop*> treetops_to_inspect;
-               bool processed = false;
-               while(true)
-               {
-                  while(curr->getNode()->getOpCodeValue() != TR::BBStart && curr != destination)
-                  {
-                     if(processed_treetops.find(curr) != processed_treetops.end())
-                     {
-                        processed = true;
-                        break;
+               do{
+                     reaches_endpoint.insert(current_block);
+                     while(curr_tt->getNode()->getOpCodeValue() != TR::BBEnd && curr_tt != source){
+                        processed_treetops.insert(curr_tt);
+                        bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr_tt) != inserted_treetops[comp()->signature()].end());
+                        recursively_detect(candidate_bci,curr_tt->getNode(),curr_tt,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
+                        curr_tt = curr_tt->getNextTreeTop();
                      }
-                     processed_treetops.insert(curr);
-                     bool is_inserted_treetop = (inserted_treetops[comp()->signature()].find(curr) != inserted_treetops[comp()->signature()].end());
-                     recursively_detect(candidate_bci,curr->getNode(),curr,is_inserted_treetop,accessed_fields,nodes_to_replace,treetops_to_inspect);
-                     if(curr == destination)
-                     {
-                        processed = true;
-                        break;
+                     // If there are any back edges and this current block is a loop header, complete the loop.
+                     for(TR::CFGEdge* e: current_block->getPredecessors()){
+                        TR::Block* pred = e->getFrom()->asBlock();
+                        if(dominators[pred].find(current_block) != dominators[pred].end()){
+                           // back edge. Traverse the loop.
+                           traverse_loop(candidate_bci,current_block,pred->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
+                        }
                      }
-                     curr = curr->getPrevTreeTop();
-                  }
-                  if(processed)
-                     break;
-                  if(parent.find(bl) == parent.end())
-                     break;
-                  curr = parent[bl]->getExit();
-                  if(curr == NULL)
-                     break;
-               }
+                     if(parent.find(current_block) == parent.end())
+                        break;
+                     current_block = parent[current_block];
+                     curr_tt = current_block->getEntry();
+                  }while(processed_treetops.find(curr_tt) == processed_treetops.end());
                std::pair<TR::TreeTop*,TR::TreeTop*> endpoint_pair = std::make_pair(source,destination);
                for(std::pair<int,int> p: accessed_fields)
                   accessed_fields_between_endpoints[endpoint_pair][p.first] += p.second;
@@ -320,15 +373,14 @@ void TR_EscapeAnalysis::traverse_between_endpoints(int candidate_bci,TR::TreeTop
                   nodes_to_replace_between_endpoints[endpoint_pair].insert(n);
                for(TR::TreeTop* t: treetops_to_inspect)
                   treetops_to_inspect_between_endpoints[endpoint_pair].insert(t);
-               continue;
             }
          }
-         else if(bl1->getExit() != NULL)
+         else if(b->getExit() != NULL) 
          {
-            parent[bl1] = bl;
-            traceMsg(comp(),"Block %d is being added!\n",bl1->getNumber());
-            traverse_between_endpoints(candidate_bci,bl1->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
+            parent[b] = curr_block;
+            traverse_between_endpoints(candidate_bci,b->getExit(),source,destination,parent,visited,reaches_endpoint,processed_treetops,end_points);
          }
+      }
       }
    }
    
@@ -339,7 +391,6 @@ bool TR_EscapeAnalysis::is_reachable(int candidate_bci,TR::Node* curr_node)
 {
    std::string signature(comp()->signature());
    int statement_bci = curr_node->getByteCodeIndex();
-   //traceMsg(comp(),"Is_reachable queried on BCI %d\n",statement_bci);
    if(curr_node->getOpCode().isCall())
    {
       //first look for the  bci of the statement.
@@ -617,11 +668,15 @@ void TR_EscapeAnalysis::update_points_to_info()
 
 void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::TreeTop* t,const bool is_inserted_treetop,std::map<int,int>& accessed_fields,std::set<TR::Node*>& nodes_to_replace,std::set<TR::TreeTop*>& treetops_to_inspect)
 {
+   if(is_inserted_treetop)
+   {
+      return;
+   }
    if(n->getOpCode().isLoadIndirect())
    {
       if(t->getNode()->getOpCode().isNullCheck())
       {
-         if(n->getFirstChild() == t->getNode()->getNullCheckReference() && !is_inserted_treetop)
+         if(n->getFirstChild() == t->getNode()->getNullCheckReference())
          {
             //this field has a pending null check. Hence, we may not scalarize this field. 
             null_checked_fields[candidate_bci].insert(n->getSymbolReference()->getReferenceNumber());
@@ -674,8 +729,6 @@ void TR_EscapeAnalysis::recursively_detect(int candidate_bci,TR::Node* n,TR::Tre
    } 
    else if(n->getOpCode().isStoreIndirect() || (n->getOpCode().isIndirect() && n->getOpCode().isWrtBar()))
    {
-      if(is_inserted_treetop)
-         return;
       if(t->getNode()->getOpCode().isNullCheck())
       {
          TR::Node* load_node = t->getNode()->getFirstChild()->getFirstChild();
@@ -1247,6 +1300,77 @@ void TR_EscapeAnalysis::scalarize(int candidate_bci, TR::TreeTop* receiving_obje
    }
 }
 
+void TR_EscapeAnalysis::compute_dominators()
+{
+   dominators.clear();
+   TR::Block* start_block = comp()->getStartBlock();
+   std::list<TR::Block*> blocks_to_process;
+   blocks_to_process.push_back(start_block);
+   std::set<TR::Block*> visited;
+   while(!blocks_to_process.empty()){
+      TR::Block* b = blocks_to_process.front();
+      blocks_to_process.pop_front();
+      visited.insert(b);
+      for(TR::CFGEdge* e: b->getSuccessors())
+      {
+         TR::Block* b1 = e->getTo()->asBlock();
+         if(visited.find(b1) == visited.end()){
+            visited.insert(b1);
+            blocks_to_process.push_back(b1);
+         }
+      }
+   }
+   std::set<TR::Block*> start_set;
+   start_set.insert(start_block);
+   dominators[start_block] = start_set;
+   std::set<TR::Block*> default_value(visited);
+   visited.erase(comp()->getStartBlock());
+   for(TR::Block* it: visited)
+   {
+      dominators[it] = default_value;
+   }
+   bool change = false;
+
+   do{
+      change = false;
+      for(TR::Block* b: visited){
+      std::set<TR::Block*> new_dom_set(default_value);
+      for(TR::CFGEdge* e: b->getPredecessors()){
+         TR::Block* p = e->getFrom()->asBlock();
+         for(TR::Block* b1: new_dom_set)
+         {
+            if(dominators[p].find(b1) == dominators[p].end())
+            {
+               new_dom_set.erase(b1);
+            }
+         }
+      }
+      new_dom_set.insert(b);
+      if(dominators[b] != new_dom_set)
+      {
+         dominators[b] = new_dom_set;
+         change = true;
+      }
+   } //iertatively converge at the LFP.
+   }while(change);
+   for(std::pair<TR::Block*,std::set<TR::Block*>> p: dominators)
+   {
+      traceMsg(comp(),"%d: ",p.first->getNumber());
+      for(TR::Block* b: p.second){
+         traceMsg(comp(),"%d,",b->getNumber());
+      }
+      traceMsg(comp(),"\n");
+   }
+}
+
+bool TR_EscapeAnalysis::is_loop_header(TR::Block* b){
+   for(TR::CFGEdge* e: b->getPredecessors()){
+      TR::Block* pred = e->getFrom()->asBlock();
+      if(dominators[pred].find(b) != dominators[pred].end())
+         return true;
+   }
+   return false;
+}
 
 int32_t TR_EscapeAnalysis::perform()
    {
@@ -1255,6 +1379,7 @@ int32_t TR_EscapeAnalysis::perform()
       if(feGetEnv("SPLIT_SCALARIZATION") == NULL)
          break;//prevents a bootstrap error. 
       traceMsg(comp(),"Starting Scalarization pass %d!\n",manager()->numPassesCompleted());
+      compute_dominators();
       treetops_to_inspect_between_endpoints.clear();
       nodes_to_replace_between_endpoints.clear();
       accessed_fields_between_endpoints.clear();
@@ -1270,7 +1395,7 @@ int32_t TR_EscapeAnalysis::perform()
       //traceMsg(comp(),"Getenv succeeded for %s!\n",comp()->signature());
       if(!process_escape_information())
       {
-         //traceMsg(comp(),"Cannot apply scalarization on %s due to lack of static escape information!\n",comp()->signature());
+         traceMsg(comp(),"Cannot apply scalarization on %s due to lack of static escape information!\n",comp()->signature());
          return 0;
       }
       bool has_throw_statements = false;
@@ -1289,12 +1414,10 @@ int32_t TR_EscapeAnalysis::perform()
          TR::Block* bl = l.front();
          if(bl->getNumber() == 2)
             start_tt = bl->getEntry();//starting TreeTop. Is this assumption true?
-         //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
          l.pop_front();
          TR::TreeTop* t = bl->getEntry();
          if(t == NULL)
          {
-            //traceMsg(comp(),"Block %d has no entry points!\n",bl->getNumber());
             //directly go to children if any.
             for(TR::CFGEdge* succ: bl->getSuccessors())
             {
@@ -1307,7 +1430,7 @@ int32_t TR_EscapeAnalysis::perform()
             }
             continue;
          }
-         while(true)
+         while(t->getNode()->getOpCodeValue() != TR::BBEnd)
          {
             //comp()->getDebug()->print(comp()->getOutFile(),t);
             TR::Node* n = t->getNode();
@@ -1335,34 +1458,33 @@ int32_t TR_EscapeAnalysis::perform()
                      candidates[candidate_bci] = t;
                }
             }
-            else if(n->getOpCodeValue() == TR::BBEnd)
-               break;//this basic block has ended.
             t = t->getNextTreeTop();
          } 
          
          for(TR::CFGEdge* succ: bl->getSuccessors())
          {
             TR::Block* bl1 = succ->getTo()->asBlock();
-            //traceMsg(comp(),"Block %d succeeds Block %d\n",bl1->getNumber(),bl->getNumber());
             if(!visited[bl1])
             {
                visited[bl1] = true;
-               //traceMsg(comp(),"Added block %d now!\n",bl1->getNumber());
                l.push_back(bl1);
             }
          }    
       }
       /*
-         We check the parameters and see of the can be scalarized too.  
+         We check the parameters to see if they can be scalarized too.  
       */
       if(feGetEnv("PARAMS") != NULL)
       {
-         //start_tt = comp()->getStartTree();
+         bool avoid_this_pointer = std::string(comp()->signature()).find("<init>") != std::string::npos;
+         // in case a constructor is being scalarized, the this pointer must not be scalarized as a parameter.
          for(int candidate_bci: nonescaping_candidates[comp()->signature()])
          {
             //look for scalarizable parameters.
             if(candidate_bci < 0)
             {
+               if(candidate_bci == -1 && avoid_this_pointer)
+                  continue;// do not scalarize the this pointer for a constructor call.
                //this is a parameter. Check if it can be scalarized possibly. 
                if(!is_reachable_in_ptg(candidate_bci) && is_not_aliased(candidate_bci))
                {
@@ -1373,7 +1495,6 @@ int32_t TR_EscapeAnalysis::perform()
          }
       }
       /*Scalarizing params is unsafe due to arbitrary aliasing that can occur.*/
-      //traceMsg(comp(),"Finished candidate detection!\n");  
       visited.clear();
       visited[comp()->getStartBlock()] = true;
       l.push_back(comp()->getStartBlock());
@@ -1381,13 +1502,10 @@ int32_t TR_EscapeAnalysis::perform()
       {
          TR::Block* bl = l.front();
          has_throw_statements |= bl->isCatchBlock();
-         //traceMsg(comp(),"Processing Block %d!\n",bl->getNumber());
-         //traceMsg(comp(),"Processing block %d now!\n",bl->getNumber());
          l.pop_front();
          TR::TreeTop* t = bl->getEntry();
          if(t == NULL)
          {
-            //traceMsg(comp(),"Block %d has no entry!\n",bl->getNumber());
             for(TR::CFGEdge* succ: bl->getSuccessors())
             {
                TR::Block* bl1 = succ->getTo()->asBlock();
@@ -1410,7 +1528,7 @@ int32_t TR_EscapeAnalysis::perform()
             }
             continue;
          }
-         while(true)
+         while(t->getNode()->getOpCodeValue() != TR::BBEnd)
          {
             //comp()->getDebug()->print(comp()->getOutFile(),t);
             TR::Node* n = t->getNode();
@@ -1439,8 +1557,6 @@ int32_t TR_EscapeAnalysis::perform()
                for(std::pair<int,TR::TreeTop*> t2: candidates)
                   end_points[t2.first].push_back(t);
             }
-            else if(n->getOpCodeValue() == TR::BBEnd)
-               break;
             t = t->getNextTreeTop();
          }
          for(TR::CFGEdge* succ: bl->getSuccessors())
@@ -1459,7 +1575,6 @@ int32_t TR_EscapeAnalysis::perform()
             if(!visited[bl1])
             {
                visited[bl1] = true;
-               //traceMsg(comp(),"Adding block %d now!\n",bl1->getNumber());
                l.push_back(bl1);
             }
          }    
@@ -1485,8 +1600,15 @@ int32_t TR_EscapeAnalysis::perform()
       {
          //backtrack using DFS
          std::set<TR::TreeTop*> ep_set;
-         for(TR::TreeTop* end_point: end_points[t.first])
+         ep_set.insert(t.second); // add the start point first.
+         int i,j;
+         std::vector<TR::TreeTop*> ep_list(end_points[t.first].size()+1);
+         ep_list[0] = t.second;
+         i = 0;
+         for(TR::TreeTop* end_point: end_points[t.first]){
             ep_set.insert(end_point);
+            ep_list[++i] = end_point;
+         }
          TR::TreeTop* receiving_treetop;
          if(t.second != start_tt)
             receiving_treetop = t.second;
@@ -1496,10 +1618,26 @@ int32_t TR_EscapeAnalysis::perform()
             TR::Node* ghost_node = TR::Node::create(TR::astore,1);
             receiving_treetop->setNode(ghost_node);
          }
-         for(TR::TreeTop* end_point: end_points[t.first])
-         { 
-            if(end_point == start_tt)  
+         // Now, we iterate through every pair of end-points present.
+         int l = ep_list.size();
+         for(i = 0;i < l;i++)
+         {
+            for(j = 0;j < l;j++){
+            TR::TreeTop* start_point = ep_list[i];
+            TR::TreeTop* end_point = ep_list[j]; 
+            if(end_point == start_tt || start_point == end_point)  
                continue;//need not backtrack unnecessarily from here.
+            TR::Block* start_block = start_point->getEnclosingBlock();
+            TR::Block* end_block = end_point->getEnclosingBlock();
+            bool start_is_header = is_loop_header(start_block);
+            bool end_is_header = is_loop_header(end_block);
+            if(start_is_header && end_is_header){
+               if(start_block != end_block) // Scalarization between 2 endpoints in a loop header is okay, although a rather rare scenario.
+                  continue;
+            }
+            else if(start_is_header || end_is_header){
+               continue; // in this case as well, we cannot scalarize due to possible loss of correctness.
+            }
             accessed_fields_between_endpoints.clear();
             treetops_to_inspect_between_endpoints.clear();
             nodes_to_replace_between_endpoints.clear();
@@ -1507,15 +1645,16 @@ int32_t TR_EscapeAnalysis::perform()
             std::set<TR::Block*> reaches_endpoint;
             std::set<TR::TreeTop*> processed_treetops;
             std::map<TR::Block*,TR::Block*> parent;
-            traverse_between_endpoints(t.first,end_point,end_point,t.second,parent,visited,reaches_endpoint,processed_treetops,ep_set);
+            traverse_between_endpoints(t.first,end_point,end_point,start_point,parent,visited,reaches_endpoint,processed_treetops,ep_set);
             if(receiving_treetop->getNode()->getSymbolReference() == NULL)
             {
                //parameter object. Add a symref for this candidate. 
                receiving_treetop->getNode()->setSymbolReference(parameter_map[t.first]);
             }
-            std::pair<TR::TreeTop*,TR::TreeTop*> p1 = std::make_pair(end_point,t.second);
-            scalarize(t.first,receiving_treetop,t.second,end_point,accessed_fields_between_endpoints[p1],nodes_to_replace_between_endpoints[p1]);
-            clean_treetops(end_point,t.second);//clean-up operation
+            std::pair<TR::TreeTop*,TR::TreeTop*> p1 = std::make_pair(end_point,start_point);
+            scalarize(t.first,receiving_treetop,start_point,end_point,accessed_fields_between_endpoints[p1],nodes_to_replace_between_endpoints[p1]);
+            clean_treetops(end_point,start_point);//clean-up operation
+         }
          }
       }
       update_points_to_info();
